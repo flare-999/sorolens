@@ -45,6 +45,10 @@ type Store interface {
 	ContractHealthInputs(ctx context.Context, contractID string) (HealthInputs, error)
 	// UpsertContractHealthScore caches a computed 0-100 health score.
 	UpsertContractHealthScore(ctx context.Context, h ContractHealthScore) error
+
+	// InsertFailedEvent parks an event that exhausted processing retries
+	// in the dead-letter queue (issue #202).
+	InsertFailedEvent(ctx context.Context, fe FailedEvent) error
 }
 
 // RedisClient is the subset of Redis operations the poller needs for advisory locks.
@@ -155,6 +159,16 @@ type Event struct {
 	TopicXDR         []string
 	ValueXDR         string
 	InSuccessfulCall bool
+}
+
+// FailedEvent mirrors store.FailedEvent for the indexer DLQ (issue #202).
+type FailedEvent struct {
+	EventID      string
+	ContractID   string
+	Network      string
+	EventPayload []byte
+	ErrorMessage string
+	Attempts     int
 }
 
 // Invocation mirrors store.Invocation.

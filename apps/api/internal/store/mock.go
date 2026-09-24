@@ -24,6 +24,8 @@ type MockStore struct {
 	alertSubscriptions []AlertSubscription
 	users              map[string]User
 	healthScores       map[string]ContractHealthScore
+	failedEvents       map[int64]FailedEvent
+	failedEventSeq     int64
 
 	// Error injection
 	UpsertContractErr   error
@@ -41,6 +43,10 @@ type MockStore struct {
 	GetUserErr          error
 	ListUpgradesErr     error
 	GetHealthScoreErr   error
+	InsertFailedEventErr error
+	ListFailedEventsErr  error
+	GetFailedEventErr    error
+	DeleteFailedEventErr error
 }
 
 // NewMockStore returns an initialized MockStore.

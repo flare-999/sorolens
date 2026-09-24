@@ -66,6 +66,9 @@ func New(h *handler.Handler) http.Handler {
 		get("/contracts/{id}/stream", h.StreamEvents)
 		get("/contracts/{id}/graph", h.ContractGraph)
 
+		// Dead-letter queue for events that failed processing (issue #202).
+		get("/dlq", h.ListFailedEvents)
+		r.With(scope, contributor).Post("/dlq/{id}/requeue", h.RequeueFailedEvent)
 
 		// API keys (admin scope + admin role).
 		r.With(scope, admin).Get("/api-keys", h.ListAPIKeys)

@@ -105,6 +105,12 @@ type fakeStore struct {
 	insertErr    error
 	healthInputs map[string]HealthInputs // contractID -> inputs
 	healthScores []ContractHealthScore
+	failedEvents []FailedEvent
+	// eventInsertErrs maps event ID -> error returned by BatchInsertEvents.
+	// Used to simulate deliberately bad events for the DLQ path (issue #202).
+	eventInsertErrs map[string]error
+	// eventInsertFailTimes maps event ID -> remaining failures before success.
+	eventInsertFailTimes map[string]int
 }
 
 func newFakeStore(contracts []Contract) *fakeStore {
@@ -129,7 +135,27 @@ func (f *fakeStore) ListContracts(_ context.Context, cursor string, limit int) (
 func (f *fakeStore) BatchInsertEvents(_ context.Context, events []Event) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	for _, e := range events {
+		if f.eventInsertErrs != nil {
+			if err, ok := f.eventInsertErrs[e.ID]; ok {
+				return err
+			}
+		}
+		if f.eventInsertFailTimes != nil {
+			if n, ok := f.eventInsertFailTimes[e.ID]; ok && n > 0 {
+				f.eventInsertFailTimes[e.ID] = n - 1
+				return errors.New("transient insert failure")
+			}
+		}
+	}
 	f.events = append(f.events, events...)
+	return nil
+}
+
+func (f *fakeStore) InsertFailedEvent(_ context.Context, fe FailedEvent) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failedEvents = append(f.failedEvents, fe)
 	return nil
 }
 
@@ -746,5 +772,81 @@ func TestPoller_noUpgradeWhenWasmHashUnchanged(t *testing.T) {
 	}
 	if len(store.upgrades) != 0 {
 		t.Errorf("expected no upgrade row when hash unchanged, got %d", len(store.upgrades))
+	}
+}
+
+
+func TestInsertEventsWithDLQ_BadEventParked(t *testing.T) {
+	st := newFakeStore([]Contract{{ID: "C1", Status: "active", Network: "testnet"}})
+	st.eventInsertErrs = map[string]error{
+		"bad-event": errors.New("deliberately bad event"),
+	}
+	rpc := &fakeRPC{
+		latestLedger: &LatestLedger{Sequence: 1000},
+		events: map[string]*GetEventsResult{
+			"C1": {
+				Events: []RPCEvent{
+					{
+						ID: "good-event", ContractID: "C1", Ledger: 900,
+						LedgerClosedAt: "2025-01-01T00:00:00Z", TxHash: "tx1",
+						Type: "contract", Topic: []string{"t"}, Value: "v",
+						InSuccessfulContractCall: true,
+					},
+					{
+						ID: "bad-event", ContractID: "C1", Ledger: 901,
+						LedgerClosedAt: "2025-01-01T00:00:01Z", TxHash: "tx2",
+						Type: "contract", Topic: []string{"t"}, Value: "bad",
+						InSuccessfulContractCall: true,
+					},
+				},
+				LatestLedger: 1000,
+			},
+		},
+	}
+	st.syncStates["C1"] = SyncState{ContractID: "C1", LastLedger: 899}
+	p := New(rpc, st, newFakeRedis(), Config{LedgerWindow: 1000}, slog.Default())
+	if err := p.processContract(context.Background(), Contract{ID: "C1", Status: "active", Network: "testnet"}); err != nil {
+		t.Fatalf("processContract: %v", err)
+	}
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.failedEvents) != 1 {
+		t.Fatalf("failedEvents = %d, want 1", len(st.failedEvents))
+	}
+	if st.failedEvents[0].EventID != "bad-event" {
+		t.Fatalf("DLQ event_id = %q", st.failedEvents[0].EventID)
+	}
+	good := false
+	for _, e := range st.events {
+		if e.ID == "good-event" {
+			good = true
+		}
+		if e.ID == "bad-event" {
+			t.Fatal("bad event should not be in events table")
+		}
+	}
+	if !good {
+		t.Fatal("good event should still be inserted")
+	}
+}
+
+func TestInsertEventsWithDLQ_RetryThenSuccess(t *testing.T) {
+	st := newFakeStore(nil)
+	st.eventInsertFailTimes = map[string]int{"flaky": 2} // fail twice, succeed on 3rd
+	p := New(&fakeRPC{}, st, newFakeRedis(), Config{}, slog.Default())
+	err := p.insertEventsWithDLQ(context.Background(), []Event{{
+		ID: "flaky", ContractID: "C1", Network: "testnet",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if len(st.failedEvents) != 0 {
+		t.Fatalf("unexpected DLQ entries: %d", len(st.failedEvents))
+	}
+	if len(st.events) != 1 || st.events[0].ID != "flaky" {
+		t.Fatalf("events = %+v", st.events)
 	}
 }
