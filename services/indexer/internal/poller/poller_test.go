@@ -98,6 +98,7 @@ type fakeStore struct {
 	invocations  []Invocation
 	upgrades     []ContractUpgrade
 	wasmHashes   map[string]string
+	wasmBinaries map[string][]byte
 	syncErr      error
 	listErr      error
 	hourly       map[string][]HourlyActivity // contractID -> buckets
@@ -113,6 +114,7 @@ func newFakeStore(contracts []Contract) *fakeStore {
 		syncStates:   make(map[string]SyncState),
 		hourly:       make(map[string][]HourlyActivity),
 		wasmHashes:   make(map[string]string),
+		wasmBinaries: make(map[string][]byte),
 		healthInputs: make(map[string]HealthInputs),
 	}
 }
@@ -184,6 +186,23 @@ func (f *fakeStore) InsertContractUpgrade(_ context.Context, u ContractUpgrade) 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.upgrades = append(f.upgrades, u)
+	return nil
+}
+
+func (f *fakeStore) HasContractWasm(_ context.Context, wasmHash string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	_, ok := f.wasmBinaries[wasmHash]
+	return ok, nil
+}
+
+func (f *fakeStore) UpsertContractWasm(_ context.Context, wasmHash string, code []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.wasmBinaries[wasmHash]; !ok {
+		cp := append([]byte(nil), code...)
+		f.wasmBinaries[wasmHash] = cp
+	}
 	return nil
 }
 
@@ -746,5 +765,57 @@ func TestPoller_noUpgradeWhenWasmHashUnchanged(t *testing.T) {
 	}
 	if len(store.upgrades) != 0 {
 		t.Errorf("expected no upgrade row when hash unchanged, got %d", len(store.upgrades))
+	}
+}
+
+func buildCodeEntryXDR(wasmHashHex string, code []byte, lastModified uint32) string {
+	var out []byte
+	putU32 := func(v uint32) { out = binary.BigEndian.AppendUint32(out, v) }
+	putU32(lastModified)
+	putU32(7) // CONTRACT_CODE
+	putU32(0) // ext v0
+	wasmHash, _ := hex.DecodeString(wasmHashHex)
+	out = append(out, wasmHash...)
+	putU32(uint32(len(code)))
+	out = append(out, code...)
+	pad := (4 - (len(code) % 4)) % 4
+	out = append(out, make([]byte, pad)...)
+	return base64.StdEncoding.EncodeToString(out)
+}
+
+func TestPoller_cachesWasmBinaryOnBaseline(t *testing.T) {
+	t.Parallel()
+
+	contractID := "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+	wasmHash := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	code := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+
+	instanceKey := instanceKeyXDR(contractID)
+	codeKey, err := wasm.ContractCodeKey(wasmHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := newFakeStore([]Contract{{ID: contractID, Status: "active", Network: ""}})
+	store.syncStates[contractID] = SyncState{ContractID: contractID, LastLedger: 499000}
+
+	rpc := &fakeRPC{
+		latestLedger: &LatestLedger{Sequence: 500000},
+		ledgerEntries: map[string]LedgerEntry{
+			instanceKey: {Key: instanceKey, XDR: buildInstanceEntryXDR(contractID, wasmHash, 501), LastModifiedLedgerSeq: 501},
+			codeKey:     {Key: codeKey, XDR: buildCodeEntryXDR(wasmHash, code, 501), LastModifiedLedgerSeq: 501},
+		},
+	}
+
+	p := New(rpc, store, newFakeRedis(), testConfig(), testLogger())
+	if err := p.Run(context.Background(), "once"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	got, ok := store.wasmBinaries[wasmHash]
+	if !ok {
+		t.Fatal("expected wasm binary to be cached on baseline")
+	}
+	if string(got) != string(code) {
+		t.Errorf("cached code mismatch: got %x want %x", got, code)
 	}
 }
