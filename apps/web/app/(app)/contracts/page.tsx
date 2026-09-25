@@ -14,6 +14,7 @@ import {
 } from "@/lib/optimisticTrack";
 import type { ContractRow } from "@/lib/optimisticTrack";
 import { TableSkeleton } from "@/components/Skeleton";
+import ImportContractsCsv from "@/components/ImportContractsCsv";
 
 // RBAC identity: same localStorage key the watchlist page uses, so the UI
 // registers a contract under the same user identity. Must map to a user
@@ -329,6 +330,7 @@ export default function ContractsPage() {
 
   // Modal state
   const [showModal, setShowModal] = useState(false);
+  const [showImport, setShowImport] = useState(false);
 
   // Track state: one request in flight at a time, errors surface as a toast.
   const [trackPending, setTrackPending] = useState(false);
@@ -504,6 +506,15 @@ export default function ContractsPage() {
         />
       )}
 
+      {showImport && (
+        <ImportContractsCsv
+          network={network}
+          userId={getUserId()}
+          onClose={() => setShowImport(false)}
+          onImported={handleTrackSuccess}
+        />
+      )}
+
       {toast && (
         <Toast
           key={toast.id}
@@ -520,16 +531,27 @@ export default function ContractsPage() {
             Contracts
           </h1>
 
-          <button
-            id="track-contract-btn"
-            type="button"
-            onClick={() => setShowModal(true)}
-            disabled={trackPending}
-            className="inline-flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-bg-page)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <span aria-hidden="true">+</span>
-            {trackPending ? "Tracking…" : "Track contract"}
-          </button>
+          <div className="flex gap-2">
+            <button
+              id="import-csv-btn"
+              type="button"
+              onClick={() => setShowImport(true)}
+              disabled={trackPending}
+              className="inline-flex items-center gap-2 rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm font-medium text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Import CSV
+            </button>
+            <button
+              id="track-contract-btn"
+              type="button"
+              onClick={() => setShowModal(true)}
+              disabled={trackPending}
+              className="inline-flex items-center gap-2 rounded-lg bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-bg-page)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <span aria-hidden="true">+</span>
+              {trackPending ? "Tracking…" : "Track contract"}
+            </button>
+          </div>
         </div>
 
         {/* Search */}
