@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -896,3 +897,21 @@ func (m *MockStore) GetLatestContractVersion(_ context.Context, contractID strin
 	return latest, nil
 }
 
+func (m *MockStore) SearchContracts(_ context.Context, query string, limit int) ([]Contract, error) {
+	if query == "" {
+		return []Contract{}, nil
+	}
+	var results []Contract
+	searchPattern := strings.ToLower(query)
+
+	for _, c := range m.contracts {
+		if strings.Contains(strings.ToLower(c.ID), searchPattern) || strings.Contains(strings.ToLower(c.Label), searchPattern) {
+			results = append(results, c)
+			if len(results) >= limit {
+				break
+			}
+		}
+	}
+
+	return results, nil
+}

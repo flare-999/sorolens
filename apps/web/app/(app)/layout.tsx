@@ -3,6 +3,7 @@ import Link from "next/link";
 import { NetworkProvider } from "@/lib/network";
 import { NetworkSelector } from "@/components/NetworkSelector";
 import { Breadcrumbs } from "@/components/Breadcrumbs";
+import { CmdkSearch } from "@/components/CmdkSearch";
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (

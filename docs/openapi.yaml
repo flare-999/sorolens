@@ -378,6 +378,40 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/v1/search:
+    get:
+      tags:
+        - Contracts
+      summary: Search contracts
+      description: Search contracts by ID or label
+      parameters:
+        - name: q
+          in: query
+          description: Search query
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Maximum number of results
+          required: false
+          schema:
+            type: integer
+            default: 10
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Contract"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /api/v1/compare:
     get:
       tags: [Stats]

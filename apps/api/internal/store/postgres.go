@@ -596,3 +596,45 @@ func nullableText(s string) *string {
 	return &s
 }
 
+func (s *postgresStore) SearchContracts(ctx context.Context, query string, limit int) ([]Contract, error) {
+	if query == "" {
+		return []Contract{}, nil
+	}
+
+	q := `
+		SELECT
+			id, network, label, wasm_hash, created_at_ledger, backfill_complete_at, status, added_at, last_activity_at
+		FROM contracts
+		WHERE id ILIKE $1 OR label ILIKE $1
+		ORDER BY added_at DESC
+		LIMIT $2
+	`
+
+	// Add % wildcards for simple ILIKE search
+	searchPattern := "%" + query + "%"
+
+	rows, err := s.pool.Query(ctx, q, searchPattern, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var contracts []Contract
+	for rows.Next() {
+		var c Contract
+		if err := rows.Scan(
+			&c.ID, &c.Network, &c.Label, &c.WasmHash,
+			&c.CreatedAtLedger, &c.BackfillCompleteAt, &c.Status,
+			&c.AddedAt, &c.LastActivityAt,
+		); err != nil {
+			return nil, err
+		}
+		contracts = append(contracts, c)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return contracts, nil
+}

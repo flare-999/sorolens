@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/exaring/otelpgx"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	sorohandler "github.com/sorolens/sorolens/apps/api/internal/handler"
 	"github.com/sorolens/sorolens/apps/api/internal/middleware"

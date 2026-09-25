@@ -37,6 +37,7 @@ type Store interface {
 	// page. Returns the next cursor (empty string when there are no more
 	// pages) as the second return value.
 	ListContracts(ctx context.Context, cursor string, limit int, f ContractFilters) ([]Contract, string, error)
+	SearchContracts(ctx context.Context, query string, limit int) ([]Contract, error)
 
 	// BatchInsertEvents inserts events, ignoring duplicates by primary key.
 	// All rows are sent in a single network round-trip.

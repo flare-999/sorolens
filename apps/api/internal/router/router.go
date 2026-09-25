@@ -85,6 +85,9 @@ func New(h *handler.Handler) http.Handler {
 		// Cross-contract events explorer feed (issue #97).
 		get("/events", h.ListAllEvents)
 
+		// Search contracts (issue #181)
+		get("/search", h.SearchContracts)
+
 		// Cross-contract comparison (issue #324): one round-trip that fans
 		// out to the per-contract stats/health lookups in parallel.
 		get("/compare", h.CompareContracts)
@@ -108,7 +111,6 @@ func New(h *handler.Handler) http.Handler {
 		get("/contracts/{id}/stream", h.StreamEvents)
 		get("/contracts/{id}/graph", h.ContractGraph)
 		get("/stream/events", h.StreamEventsSSE)
-
 
 		// API keys (admin scope + admin role).
 		r.With(scope, admin).Get("/api-keys", h.ListAPIKeys)
