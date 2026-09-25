@@ -234,3 +234,19 @@ type ContractHealthScore struct {
 	ComponentStorageTTL  int32
 	ComputedAt           time.Time
 }
+
+// ContractVersion mirrors store.ContractVersion.
+type ContractVersion struct {
+	ContractID        string
+	WasmHash          string
+	FirstSeenLedger   int64
+	TxHash            string
+	VerifiedSourceRef string
+}
+
+// ErrVersionNotFound is returned by GetLatestContractVersion when no entry exists.
+var ErrVersionNotFound = errorString("poller: contract version not found")
+
+type errorString string
+
+func (e errorString) Error() string { return string(e) }

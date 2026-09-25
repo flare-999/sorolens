@@ -775,7 +775,6 @@ func TestPoller_noUpgradeWhenWasmHashUnchanged(t *testing.T) {
 	}
 }
 
-
 func TestInsertEventsWithDLQ_BadEventParked(t *testing.T) {
 	st := newFakeStore([]Contract{{ID: "C1", Status: "active", Network: "testnet"}})
 	st.eventInsertErrs = map[string]error{
@@ -804,7 +803,9 @@ func TestInsertEventsWithDLQ_BadEventParked(t *testing.T) {
 		},
 	}
 	st.syncStates["C1"] = SyncState{ContractID: "C1", LastLedger: 899}
-	p := New(rpc, st, newFakeRedis(), Config{LedgerWindow: 1000}, slog.Default())
+	// The contract's network must be configured: processContract skips a
+	// contract whose network has no RPC client, which would park nothing.
+	p := NewWithRPCClients(map[string]RPCClient{"testnet": rpc}, st, newFakeRedis(), Config{LedgerWindow: 1000}, slog.Default())
 	if err := p.processContract(context.Background(), Contract{ID: "C1", Status: "active", Network: "testnet"}); err != nil {
 		t.Fatalf("processContract: %v", err)
 	}

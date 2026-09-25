@@ -16,6 +16,7 @@ import (
 
 	"github.com/sorolens/sorolens/services/indexer/internal/anomaly"
 	"github.com/sorolens/sorolens/services/indexer/internal/healthscore"
+	"github.com/sorolens/sorolens/services/indexer/internal/metrics"
 	"github.com/sorolens/sorolens/services/indexer/internal/partition"
 	"github.com/sorolens/sorolens/services/indexer/internal/wasm"
 )
@@ -67,6 +68,16 @@ type Poller struct {
 	redis      RedisClient
 	cfg        Config
 	log        *slog.Logger
+	// metrics records the per-network lag gauges on every pass (issue #198).
+	// It is nil unless SetMetrics is called; nil disables metric recording.
+	metrics *metrics.Recorder
+}
+
+// SetMetrics attaches the Prometheus recorder the poller updates on every
+// pass (issue #198). It must be called before Run; when it is never called
+// metric recording is skipped, so existing callers are unaffected.
+func (p *Poller) SetMetrics(r *metrics.Recorder) {
+	p.metrics = r
 }
 
 // New returns a Poller wired with the given dependencies.
