@@ -32,6 +32,7 @@ type MockStore struct {
 	indexerCursors     map[string]uint32
 	contractVersions   map[string][]ContractVersion
 	alertGroups        []AlertGroup
+	labels             []Label
 
 	// Error injection
 	UpsertContractErr           error
@@ -94,6 +95,7 @@ func NewMockStore() *MockStore {
 		alerts:             make([]ContractAlert, 0),
 		alertSubscriptions: make([]AlertSubscription, 0),
 		users:              make(map[string]User),
+		labels:             make([]Label, 0),
 		wasmBinaries:       make(map[string]ContractWasm),
 		indexerCursors:     make(map[string]uint32),
 		contractVersions:   make(map[string][]ContractVersion),

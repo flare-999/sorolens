@@ -360,8 +360,14 @@ func renderReportPDF(m store.MonthlySLA, signature string) ([]byte, error) {
 			"  Signature    UNSIGNED — set REPORT_SIGNING_KEY to sign exports",
 		)
 	} else {
+		// Truncate for display only, and never assume the signature is at
+		// least 16 characters long.
+		short := signature
+		if len(short) > 16 {
+			short = short[:16]
+		}
 		lines = append(lines,
-			"  Signature    "+signature[:16]+"...",
+			"  Signature    "+short+"...",
 			"  (full value in the document Info dictionary and the",
 			"   X-Report-Signature response header)",
 		)
