@@ -27,6 +27,8 @@ type MockStore struct {
 	users              map[string]User
 	healthScores       map[string]ContractHealthScore
 	wasmBinaries       map[string]ContractWasm
+	failedEvents       map[int64]FailedEvent
+	failedEventSeq     int64
 	indexerCursors     map[string]uint32
 	contractVersions   map[string][]ContractVersion
 	alertGroups        []AlertGroup
@@ -51,7 +53,35 @@ type MockStore struct {
 	RecordContractVersionErr    error
 	ListContractVersionsErr     error
 	GetLatestContractVersionErr error
-	GetWasmErr          error
+	GetWasmErr                  error
+	InsertFailedEventErr error
+	ListFailedEventsErr  error
+	GetFailedEventErr    error
+	DeleteFailedEventErr error
+}
+
+func (m *MockStore) UpsertLabel(_ context.Context, label Label) error {
+	for i, existing := range m.labels {
+		if existing.Label == label.Label && (label.Public || existing.WorkspaceID == label.WorkspaceID) { m.labels[i] = label; return nil }
+	}
+	m.labels = append(m.labels, label)
+	return nil
+}
+
+func (m *MockStore) ListLabels(_ context.Context, workspaceID, query string) ([]Label, error) {
+	query = strings.ToLower(query)
+	var out []Label
+	for _, label := range m.labels {
+		if !label.Public && label.WorkspaceID != workspaceID { continue }
+		if query == "" || strings.Contains(strings.ToLower(label.Label), query) || strings.Contains(strings.ToLower(label.Value), query) { out = append(out, label) }
+	}
+	return out, nil
+}
+
+func (m *MockStore) ResolveLabel(_ context.Context, workspaceID, query string) (Label, error) {
+	for _, label := range m.labels { if label.Public && strings.EqualFold(label.Label, query) { return label, nil } }
+	for _, label := range m.labels { if !label.Public && label.WorkspaceID == workspaceID && strings.EqualFold(label.Label, query) { return label, nil } }
+	return Label{}, ErrNotFound
 }
 
 // NewMockStore returns an initialized MockStore.

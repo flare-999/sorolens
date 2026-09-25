@@ -24,7 +24,9 @@ type APIStore interface {
 	store.UserStore
 	store.PerformanceStore
 	store.ContractWasmStore
+	store.FailedEventStore
 	store.GlobalEventStore
+	store.LabelStore
 }
 
 // Pinger is implemented by both the postgres pool and the Redis client.

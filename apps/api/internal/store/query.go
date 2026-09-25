@@ -25,7 +25,9 @@ type FullStore interface {
 	WatchlistStore
 	UserStore
 	PerformanceStore
+	ContractWasmStore
 	GlobalEventStore
+	LabelStore
 }
 
 // NewFullStore returns a FullStore backed by the given pool.

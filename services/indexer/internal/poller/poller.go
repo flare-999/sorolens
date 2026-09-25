@@ -9,17 +9,23 @@ package poller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/sorolens/sorolens/services/indexer/internal/anomaly"
 	"github.com/sorolens/sorolens/services/indexer/internal/healthscore"
+	"github.com/sorolens/sorolens/services/indexer/internal/metrics"
 	"github.com/sorolens/sorolens/services/indexer/internal/partition"
 	"github.com/sorolens/sorolens/services/indexer/internal/wasm"
 )
 
 const (
+	// maxEventRetries is how many times a single event is retried before
+	// it is parked in the dead-letter queue (issue #202).
+	maxEventRetries = 3
+
 	// lockTTL is the Redis advisory lock lifetime per contract.
 	// Set to twice the expected maximum per-contract processing time.
 	lockTTL = 60 * time.Second
@@ -62,6 +68,16 @@ type Poller struct {
 	redis      RedisClient
 	cfg        Config
 	log        *slog.Logger
+	// metrics records the per-network lag gauges on every pass (issue #198).
+	// It is nil unless SetMetrics is called; nil disables metric recording.
+	metrics *metrics.Recorder
+}
+
+// SetMetrics attaches the Prometheus recorder the poller updates on every
+// pass (issue #198). It must be called before Run; when it is never called
+// metric recording is skipped, so existing callers are unaffected.
+func (p *Poller) SetMetrics(r *metrics.Recorder) {
+	p.metrics = r
 }
 
 // New returns a Poller wired with the given dependencies.
@@ -477,8 +493,8 @@ func (p *Poller) processContract(ctx context.Context, contract Contract) error {
 	}
 
 	if len(events) > 0 {
-		if err := p.store.BatchInsertEvents(ctx, events); err != nil {
-			return fmt.Errorf("batch insert events: %w", err)
+		if err := p.insertEventsWithDLQ(ctx, events); err != nil {
+			return fmt.Errorf("insert events: %w", err)
 		}
 	}
 	if len(invocations) > 0 {
@@ -497,6 +513,65 @@ func (p *Poller) processContract(ctx context.Context, contract Contract) error {
 		"invocations", len(invocations),
 		"duration", time.Since(runStart),
 	)
+	return nil
+}
+
+// insertEventsWithDLQ persists events one at a time, retrying each up to
+// maxEventRetries times. An event that still cannot be stored is parked in the
+// dead-letter queue (issue #202) and the remaining events are still processed,
+// so a single bad event can no longer block a contract's indexing pass.
+//
+// Per-event rather than per-batch by design: BatchInsertEvents rejects the
+// whole slice when any one element is bad, so retrying as a batch would park
+// the good events alongside the bad one.
+func (p *Poller) insertEventsWithDLQ(ctx context.Context, events []Event) error {
+	for _, ev := range events {
+		var lastErr error
+		stored := false
+		for attempt := 1; attempt <= maxEventRetries; attempt++ {
+			if err := p.store.BatchInsertEvents(ctx, []Event{ev}); err != nil {
+				lastErr = err
+				continue
+			}
+			stored = true
+			break
+		}
+		if stored {
+			continue
+		}
+
+		// EventPayload is what the requeue endpoint re-inserts, so it must be a
+		// JSON-serialized Event: handler/dlq.go unmarshals it back into
+		// store.Event. Event holds only plain fields, so a marshal failure is
+		// unreachable in practice — park the row anyway rather than drop it.
+		payload, marshalErr := json.Marshal(ev)
+		msg := "insert retries exhausted"
+		switch {
+		case marshalErr != nil:
+			p.log.Error("marshal event for DLQ", "event_id", ev.ID, "err", marshalErr)
+			payload, msg = nil, "marshal payload: "+marshalErr.Error()
+		case lastErr != nil:
+			msg = lastErr.Error()
+		}
+
+		if err := p.store.InsertFailedEvent(ctx, FailedEvent{
+			EventID:      ev.ID,
+			ContractID:   ev.ContractID,
+			Network:      ev.Network,
+			EventPayload: payload,
+			ErrorMessage: msg,
+			Attempts:     maxEventRetries,
+		}); err != nil {
+			// The event is now stored nowhere, which the caller must know about.
+			return fmt.Errorf("park event %s in DLQ: %w", ev.ID, err)
+		}
+		p.log.Warn("event parked in DLQ",
+			"event_id", ev.ID,
+			"contract_id", ev.ContractID,
+			"attempts", maxEventRetries,
+			"err", msg,
+		)
+	}
 	return nil
 }
 
@@ -557,7 +632,7 @@ func (p *Poller) checkWasmHash(ctx context.Context, rpc RPCClient, contract Cont
 				"err", err,
 			)
 		}
-		return nil
+		return nil // unchanged
 	}
 
 	upgrade := ContractUpgrade{
@@ -591,6 +666,48 @@ func (p *Poller) checkWasmHash(ctx context.Context, rpc RPCClient, contract Cont
 
 // ledgerFromEntry returns the modification ledger of the first instance entry
 // if present, falling back to the latest ledger reported by the RPC result.
+// cacheWasmBinary fetches the CONTRACT_CODE ledger entry for wasmHash and
+// stores the raw bytes in the content-addressed Wasm cache (issue #162).
+// Best-effort: missing entries and decode failures are non-fatal so event
+// indexing is never blocked by a Wasm fetch problem.
+func (p *Poller) cacheWasmBinary(ctx context.Context, rpc RPCClient, wasmHash string) error {
+	exists, err := p.store.HasContractWasm(ctx, wasmHash)
+	if err != nil {
+		return fmt.Errorf("has contract wasm: %w", err)
+	}
+	if exists {
+		return nil
+	}
+
+	key, err := wasm.ContractCodeKey(wasmHash)
+	if err != nil {
+		return fmt.Errorf("build code key: %w", err)
+	}
+	res, err := rpc.GetLedgerEntries(ctx, []string{key})
+	if err != nil {
+		return fmt.Errorf("get code entry: %w", err)
+	}
+	var code []byte
+	for _, e := range res.Entries {
+		if c, ok := wasm.WasmCodeFromEntry(e.XDR); ok {
+			code = c
+			break
+		}
+	}
+	if len(code) == 0 {
+		// Code entry not yet readable (retention / race); retry next poll.
+		return nil
+	}
+	if err := p.store.UpsertContractWasm(ctx, wasmHash, code); err != nil {
+		return fmt.Errorf("upsert contract wasm: %w", err)
+	}
+	p.log.Info("cached contract wasm binary",
+		"wasm_hash", wasmHash,
+		"size_bytes", len(code),
+	)
+	return nil
+}
+
 func ledgerFromEntry(res *GetLedgerEntriesResult) uint32 {
 	for _, e := range res.Entries {
 		if e.LastModifiedLedgerSeq != 0 {
@@ -687,46 +804,4 @@ func min32(a, b uint32) uint32 {
 		return a
 	}
 	return b
-}
-
-// cacheWasmBinary fetches the CONTRACT_CODE ledger entry for wasmHash and
-// stores the raw bytes in the content-addressed Wasm cache (issue #162).
-// Best-effort: missing entries and decode failures are non-fatal so event
-// indexing is never blocked by a Wasm fetch problem.
-func (p *Poller) cacheWasmBinary(ctx context.Context, rpc RPCClient, wasmHash string) error {
-	exists, err := p.store.HasContractWasm(ctx, wasmHash)
-	if err != nil {
-		return fmt.Errorf("has contract wasm: %w", err)
-	}
-	if exists {
-		return nil
-	}
-
-	key, err := wasm.ContractCodeKey(wasmHash)
-	if err != nil {
-		return fmt.Errorf("build code key: %w", err)
-	}
-	res, err := rpc.GetLedgerEntries(ctx, []string{key})
-	if err != nil {
-		return fmt.Errorf("get code entry: %w", err)
-	}
-	var code []byte
-	for _, e := range res.Entries {
-		if c, ok := wasm.WasmCodeFromEntry(e.XDR); ok {
-			code = c
-			break
-		}
-	}
-	if len(code) == 0 {
-		// Code entry not yet readable (retention / race); retry next poll.
-		return nil
-	}
-	if err := p.store.UpsertContractWasm(ctx, wasmHash, code); err != nil {
-		return fmt.Errorf("upsert contract wasm: %w", err)
-	}
-	p.log.Info("cached contract wasm binary",
-		"wasm_hash", wasmHash,
-		"size_bytes", len(code),
-	)
-	return nil
 }

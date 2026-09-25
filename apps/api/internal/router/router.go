@@ -40,12 +40,28 @@ func New(h *handler.Handler, maxBodyBytes int64) http.Handler {
 	r.Get("/health", h.Health)
 	r.Get("/readyz", h.Readyz)
 
+	// Version (public, not rate-limited, no DB access). Mounted at /api/version
+	// rather than under /api/v1 so it stays reachable without a versioned client
+	// and without the v1 scope/role middleware.
+	r.Get("/api/version", h.Version)
+
 	// Prometheus metrics (issue #143: response cache hit/miss counters). A
 	// registry per router keeps tests that build many routers independent.
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	reg.MustRegister(middleware.CacheCollectors()...)
 	r.Get("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}).ServeHTTP)
+	pprofAdmin := middleware.RequireRoleOrForbidden(h.Store, h.Logger, middleware.RoleAdmin)
+	r.With(pprofAdmin).Get("/debug/pprof", pprof.Index)
+	r.With(pprofAdmin).Get("/debug/pprof/", pprof.Index)
+	r.With(pprofAdmin).Get("/debug/pprof/cmdline", pprof.Cmdline)
+	r.With(pprofAdmin).Get("/debug/pprof/profile", pprof.Profile)
+	r.With(pprofAdmin).Get("/debug/pprof/symbol", pprof.Symbol)
+	r.With(pprofAdmin).Post("/debug/pprof/symbol", pprof.Symbol)
+	r.With(pprofAdmin).Get("/debug/pprof/trace", pprof.Trace)
+	for _, profile := range []string{"allocs", "block", "goroutine", "heap", "mutex", "threadcreate"} {
+		r.With(pprofAdmin).Get("/debug/pprof/"+profile, pprof.Handler(profile).ServeHTTP)
+	}
 
 	// Slack slash commands (issue #127). Outside /api/v1 because Slack posts
 	// form-encoded bodies, which the JSON content-type guard would reject;
@@ -89,6 +105,8 @@ func New(h *handler.Handler, maxBodyBytes int64) http.Handler {
 		cacheContracts := middleware.Cache(h.Cache, middleware.CacheNamespaceContracts, h.CacheTTL, h.Logger)
 		cacheWatchdog := middleware.Cache(h.Cache, middleware.CacheNamespaceWatchdog, h.CacheTTL, h.Logger)
 		purgeContracts := middleware.InvalidateOnWrite(h.Cache, h.Logger, middleware.CacheNamespaceContracts)
+		cacheLabels := middleware.Cache(h.Cache, middleware.CacheNamespaceLabels, h.CacheTTL, h.Logger)
+		purgeLabels := middleware.InvalidateOnWrite(h.Cache, h.Logger, middleware.CacheNamespaceLabels)
 
 		// Cross-contract events explorer feed (issue #97).
 		get("/events", h.ListAllEvents)
@@ -107,6 +125,9 @@ func New(h *handler.Handler, maxBodyBytes int64) http.Handler {
 		// Contracts. Registration mutates shared state, so it requires at
 		// least contributor role. Reads stay open.
 		r.With(scope, contributor, purgeContracts).Post("/contracts", h.RegisterContract)
+		r.With(scope, contributor, purgeLabels).Post("/labels", h.CreateLabel)
+		r.With(scope, cacheLabels).Get("/labels", h.ListLabels)
+		r.With(scope, cacheLabels).Get("/resolve", h.ResolveLabel)
 		r.With(scope, cacheContracts).Get("/contracts", h.ListContracts)
 		r.With(scope, cacheContracts).Get("/contracts/{id}", h.GetContract)
 		get("/contracts/{id}/events", h.ListEvents)
@@ -117,6 +138,7 @@ func New(h *handler.Handler, maxBodyBytes int64) http.Handler {
 		get("/contracts/{id}/stats", h.ContractStats)
 		get("/contracts/{id}/forecast", h.ContractForecast)
 		get("/contracts/{id}/snapshot", h.ContractSnapshot)
+		get("/contracts/{id}/snapshot.json", h.ContractSnapshotExport)
 		get("/contracts/{id}/upgrades", h.ListContractUpgrades)
 		get("/contracts/{id}/health-score", h.GetContractHealthScore)
 		get("/contracts/{id}/summary", h.ContractSummary)
@@ -125,6 +147,9 @@ func New(h *handler.Handler, maxBodyBytes int64) http.Handler {
 		get("/contracts/{id}/wasm", h.GetContractWasm)
 
 		get("/stream/events", h.StreamEventsSSE)
+		// Dead-letter queue for events that failed processing (issue #202).
+		get("/dlq", h.ListFailedEvents)
+		r.With(scope, contributor).Post("/dlq/{id}/requeue", h.RequeueFailedEvent)
 
 		// API keys (admin scope + admin role).
 		r.With(scope, admin).Get("/api-keys", h.ListAPIKeys)
