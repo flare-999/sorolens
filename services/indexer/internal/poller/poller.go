@@ -505,6 +505,65 @@ func (p *Poller) processContract(ctx context.Context, contract Contract) error {
 	return nil
 }
 
+// insertEventsWithDLQ persists events one at a time, retrying each up to
+// maxEventRetries times. An event that still cannot be stored is parked in the
+// dead-letter queue (issue #202) and the remaining events are still processed,
+// so a single bad event can no longer block a contract's indexing pass.
+//
+// Per-event rather than per-batch by design: BatchInsertEvents rejects the
+// whole slice when any one element is bad, so retrying as a batch would park
+// the good events alongside the bad one.
+func (p *Poller) insertEventsWithDLQ(ctx context.Context, events []Event) error {
+	for _, ev := range events {
+		var lastErr error
+		stored := false
+		for attempt := 1; attempt <= maxEventRetries; attempt++ {
+			if err := p.store.BatchInsertEvents(ctx, []Event{ev}); err != nil {
+				lastErr = err
+				continue
+			}
+			stored = true
+			break
+		}
+		if stored {
+			continue
+		}
+
+		// EventPayload is what the requeue endpoint re-inserts, so it must be a
+		// JSON-serialized Event: handler/dlq.go unmarshals it back into
+		// store.Event. Event holds only plain fields, so a marshal failure is
+		// unreachable in practice — park the row anyway rather than drop it.
+		payload, marshalErr := json.Marshal(ev)
+		msg := "insert retries exhausted"
+		switch {
+		case marshalErr != nil:
+			p.log.Error("marshal event for DLQ", "event_id", ev.ID, "err", marshalErr)
+			payload, msg = nil, "marshal payload: "+marshalErr.Error()
+		case lastErr != nil:
+			msg = lastErr.Error()
+		}
+
+		if err := p.store.InsertFailedEvent(ctx, FailedEvent{
+			EventID:      ev.ID,
+			ContractID:   ev.ContractID,
+			Network:      ev.Network,
+			EventPayload: payload,
+			ErrorMessage: msg,
+			Attempts:     maxEventRetries,
+		}); err != nil {
+			// The event is now stored nowhere, which the caller must know about.
+			return fmt.Errorf("park event %s in DLQ: %w", ev.ID, err)
+		}
+		p.log.Warn("event parked in DLQ",
+			"event_id", ev.ID,
+			"contract_id", ev.ContractID,
+			"attempts", maxEventRetries,
+			"err", msg,
+		)
+	}
+	return nil
+}
+
 // checkWasmHash compares the current on-chain Wasm hash of the contract's
 // instance entry against the hash observed on the previous poll. A mismatch
 // means the contract code was upgraded. The change is recorded as a

@@ -339,6 +339,12 @@ func (s *stubStore) BatchInsertEvents(ctx context.Context, events []poller.Event
 func (s *stubStore) BatchInsertInvocations(ctx context.Context, invocations []poller.Invocation) error {
 	return nil
 }
+
+// InsertFailedEvent parks an event that exhausted its insert retries in the DLQ
+// (issue #202). The stub drops it; the real store is wired in apps/api.
+func (s *stubStore) InsertFailedEvent(_ context.Context, _ poller.FailedEvent) error {
+	return nil
+}
 func (s *stubStore) GetSyncState(ctx context.Context, contractID string) (poller.SyncState, error) {
 	return poller.SyncState{ContractID: contractID}, nil
 }
