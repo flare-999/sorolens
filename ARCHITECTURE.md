@@ -271,6 +271,7 @@ CREATE TABLE sync_state (
 | `idx_invocations_status` | Supports the "show only failures" filter on the invocations list. |
 | `idx_storage_live_until` | The TTL health view needs to order by `live_until_ledger ASC` for a given contract; partial index on `status = 'live'` avoids scanning archived rows. |
 | `idx_storage_durability` | Supports filtering the storage view by entry type. |
+| `idx_contract_tags_tag` | Cross-contract lookup for the dashboard's tag filter ("which contracts carry tag X?"). The `(contract_id, tag)` primary key already serves per-contract tag reads, so only the reverse direction needs an index. |
 
 ---
 
@@ -305,8 +306,8 @@ keyed by the chi route pattern (`internal/middleware/scopes.go`):
 
 | Scope | Grants |
 |---|---|
-| `read:contracts` | contract, event, invocation, storage, stats, and snapshot reads |
-| `write:contracts` | `POST /api/v1/contracts` |
+| `read:contracts` | contract, event, invocation, storage, stats, snapshot, and interface-spec reads |
+| `write:contracts` | `POST /api/v1/contracts` and contract tag writes |
 | `read:watchdog` | all `/api/v1/watchdog/*` reads |
 | `admin:*` | everything, including API key management |
 
@@ -353,7 +354,8 @@ Register a contract for tracking.
 
 List all tracked contracts.
 
-**Query params:** `network` (filter by network), `status` (filter by status).
+**Query params:** `network` (filter by network), `status` (filter by status),
+`tag` (show only contracts carrying this tag).
 
 **Response `200`:**
 ```json
@@ -365,7 +367,8 @@ List all tracked contracts.
       "label": "My Token Contract",
       "status": "active",
       "wasm_hash": "a1b2c3d4...",
-      "added_at": "2026-07-01T10:00:00Z"
+      "added_at": "2026-07-01T10:00:00Z",
+      "tags": ["prod", "defi"]
     }
   ]
 }
@@ -391,7 +394,8 @@ Get a single contract's metadata and sync state.
     "last_run_at": "2026-07-26T10:00:00Z"
   },
   "storage_entry_count": 42,
-  "expiring_entry_count": 3
+  "expiring_entry_count": 3,
+  "tags": ["prod", "defi"]
 }
 ```
 
@@ -404,6 +408,92 @@ Get a single contract's metadata and sync state.
 Stop tracking a contract. Data is retained but the indexer stops polling.
 
 **Response:** `204 No Content`.
+
+---
+
+#### `GET /api/v1/contracts/:id/spec`
+
+Returns the contract's SEP-48 interface: a JSON tree of the functions it
+exports, with their argument and return types.
+
+The spec is extracted from the `contractspecv0` custom section of the
+contract's Wasm the first time the indexer indexes it, and cached in the
+`contract_specs` table. Type nodes are one of the scalar kinds
+(`address`, `u32`, `i128`, `string`, ...) or a composite carrying its children:
+`vec` and `option` use `elem`, `map` uses `key` and `value`, `result` uses `ok`
+and `err`, `tuple` uses `tuple`, and `bytes_n` carries `n`. A reference to a
+user-defined type is `{"kind":"udt","name":"..."}`.
+
+**Response `200`:**
+```json
+{
+  "contract_id": "CDLZFC3S...",
+  "wasm_hash": "a1b2c3d4...",
+  "parsed_at": "2026-07-01T10:06:00Z",
+  "spec": {
+    "functions": [
+      {
+        "name": "transfer",
+        "doc": "Transfer tokens between two accounts",
+        "inputs": [
+          { "name": "from", "type": { "kind": "address" } },
+          { "name": "to", "type": { "kind": "address" } },
+          { "name": "amount", "type": { "kind": "i128" } }
+        ],
+        "outputs": [{ "kind": "void" }]
+      }
+    ]
+  }
+}
+```
+
+**Responses:**
+- `200`: the parsed interface.
+- `404`: the contract is not tracked (message: "contract not found"), or it is
+tracked but its spec has not been parsed yet (message: "no parsed interface
+spec is available for this contract yet"). A contract whose Wasm carries no
+`contractspecv0` section — for example one not built with `#[contractimpl]` —
+never gets a row, so it answers `404` indefinitely; the indexer logs a warning
+rather than failing the indexing pass.
+
+---
+
+#### `POST /api/v1/contracts/:id/tags`
+
+Add a user-defined tag to a contract. Tags are free-form labels (e.g. `prod`,
+`defi`, `staging`) that let an operator organize a large fleet and filter the
+contracts list. Requires the `write:contracts` scope and the `contributor`
+role.
+
+Tags are normalized before storage: surrounding whitespace is trimmed and the
+value is lowercased. A tag must be 1-32 characters matching
+`^[a-z0-9][a-z0-9_-]*$` (lowercase letters, digits, hyphen, or underscore,
+starting with a letter or digit); anything else receives `422`.
+
+**Request body:**
+```json
+{ "tag": "prod" }
+```
+
+**Responses:**
+- `200 OK`: the contract's full, sorted tag list. Adding a tag that is already
+  present is a no-op, so the operation is idempotent.
+  ```json
+  { "contract_id": "CDLZFC3S...", "tags": ["defi", "prod"] }
+  ```
+- `404 Not Found`: no tracked contract with that ID.
+- `422 Unprocessable Entity`: missing or malformed tag.
+
+---
+
+#### `DELETE /api/v1/contracts/:id/tags/:tag`
+
+Remove a user-defined tag from a contract. Requires the `write:contracts`
+scope and the `contributor` role. Removing a tag that is not present is a
+no-op.
+
+**Response:** `204 No Content`. `404 Not Found` when the contract is unknown,
+`422 Unprocessable Entity` when the tag is malformed.
 
 ---
 

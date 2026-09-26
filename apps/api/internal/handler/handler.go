@@ -18,6 +18,8 @@ type APIStore interface {
 	store.ArchiveStore
 	store.WatchdogStore
 	store.ContractUpgradeStore
+	store.ContractSpecStore
+	store.ContractTagStore
 	store.HealthScoreStore
 	store.APIKeyStore
 	store.AlertSubscriptionStore

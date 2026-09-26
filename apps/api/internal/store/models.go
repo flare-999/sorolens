@@ -13,6 +13,9 @@ type Contract struct {
 	Status             string // pending | backfilling | active | paused | error
 	AddedAt            time.Time
 	LastActivityAt     *time.Time
+	// Tags are free-form labels held in the contract_tags table, hydrated
+	// alongside the contract so the list and detail responses carry them.
+	Tags []string
 }
 
 // Event is a single contract event indexed from the Soroban RPC.

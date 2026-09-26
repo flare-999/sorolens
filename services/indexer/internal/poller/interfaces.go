@@ -12,7 +12,6 @@ type RPCClient interface {
 	GetEvents(ctx context.Context, startLedger, endLedger uint32, filters []EventFilter) (*GetEventsResult, error)
 	GetTransaction(ctx context.Context, hash string) (*TransactionResult, error)
 	GetLedgerEntries(ctx context.Context, keys []string) (*GetLedgerEntriesResult, error)
-	GetContractWasmHash(ctx context.Context, contractID string) (string, error)
 }
 
 // Store is the subset of the data store the poller needs.
@@ -25,14 +24,6 @@ type Store interface {
 	UpsertSyncState(ctx context.Context, s SyncState) error
 	CreateNextMonthPartition(ctx context.Context) error
 	CreateMonthlyPartitionIfNotExists(ctx context.Context, year int, month int) error
-
-	// GetIndexerCursor returns the last committed ledger for a network, or 0 if none.
-	GetIndexerCursor(ctx context.Context, network string) (uint32, error)
-	// SetIndexerCursor updates the last committed ledger for a network.
-	SetIndexerCursor(ctx context.Context, network string, ledger uint32) error
-	// BatchInsertWithCursor atomically writes events, invocations, contract sync state,
-	// and advances the network indexer cursor within a single database transaction.
-	BatchInsertWithCursor(ctx context.Context, network string, ledger uint32, events []Event, invocations []Invocation, syncState SyncState) error
 
 	// RecentHourlyActivity returns per-hour activity buckets for the most
 	// recent `hours` hours (oldest first), aggregated across events and
@@ -48,9 +39,12 @@ type Store interface {
 	// UpdateContractWasmHash records the now-current on-chain Wasm hash for a
 	// contract so subsequent polls can diff against it.
 	UpdateContractWasmHash(ctx context.Context, contractID, wasmHash string) error
-	// HasContractWasm reports whether the Wasm binary for wasmHash is cached.
+	// HasContractWasm reports whether the Wasm binary for wasmHash is cached
+	// (issue #162). The cache is content-addressed, so an existing row means
+	// the bytes never need re-fetching.
 	HasContractWasm(ctx context.Context, wasmHash string) (bool, error)
-	// UpsertContractWasm stores Wasm bytes under their content-addressed hash.
+	// UpsertContractWasm stores the raw Wasm bytes under their
+	// content-addressed hash (issue #162).
 	UpsertContractWasm(ctx context.Context, wasmHash string, code []byte) error
 
 	// ContractHealthInputs aggregates the raw signals that feed the composite
@@ -58,11 +52,6 @@ type Store interface {
 	ContractHealthInputs(ctx context.Context, contractID string) (HealthInputs, error)
 	// UpsertContractHealthScore caches a computed 0-100 health score.
 	UpsertContractHealthScore(ctx context.Context, h ContractHealthScore) error
-
-	// RecordContractVersion persists a detected Wasm hash transition (issue #276).
-	RecordContractVersion(ctx context.Context, v ContractVersion) error
-	// GetLatestContractVersion returns the most recently recorded ContractVersion.
-	GetLatestContractVersion(ctx context.Context, contractID string) (ContractVersion, error)
 
 	// InsertFailedEvent parks an event that exhausted processing retries
 	// in the dead-letter queue (issue #202).

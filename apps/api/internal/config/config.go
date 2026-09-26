@@ -16,6 +16,10 @@
 // Optional with no default: SENTRY_DSN. Error reporting is disabled entirely
 // when it is unset.
 //
+// METRICS_PORT is optional with no default: when set, GET /metrics is also
+// served on that port (a dedicated admin listener); when empty the endpoint is
+// only available on PORT.
+//
 // Load collects every missing required variable into a single error message
 // so the process fails fast with actionable output.
 package config
@@ -48,6 +52,10 @@ type Config struct {
 	Port string
 	// LogLevel controls log verbosity: debug, info, warn, or error.
 	LogLevel string
+	// MetricsPort, when non-empty, starts a second HTTP listener that serves
+	// only GET /metrics. It lets operators scrape metrics on a private
+	// interface instead of exposing the endpoint on the public API port.
+	MetricsPort string
 	// IndexerPollInterval is how often the indexer polls for new events.
 	IndexerPollInterval time.Duration
 	// IndexerLedgerWindow is the number of past ledgers included in a backfill.
@@ -106,6 +114,7 @@ func Load() (*Config, error) {
 		StellarNetwork:       getEnvDefault("STELLAR_NETWORK", "testnet"),
 		Port:                 getEnvDefault("PORT", "8080"),
 		LogLevel:             getEnvDefault("LOG_LEVEL", "info"),
+		MetricsPort:          os.Getenv("METRICS_PORT"),
 		InitialAdminGitHubID: os.Getenv("INITIAL_ADMIN_GITHUB_ID"),
 		SentryDSN:            os.Getenv("SENTRY_DSN"),
 		SentryEnvironment:    getEnvDefault("SENTRY_ENVIRONMENT", "production"),

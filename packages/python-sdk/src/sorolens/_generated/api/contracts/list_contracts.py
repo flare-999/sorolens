@@ -17,6 +17,7 @@ def _get_kwargs(
     limit: int | Unset = UNSET,
     network: ListContractsNetwork | Unset = UNSET,
     status: str | Unset = UNSET,
+    tag: str | Unset = UNSET,
 ) -> dict[str, Any]:
 
     params: dict[str, Any] = {}
@@ -32,6 +33,8 @@ def _get_kwargs(
     params["network"] = json_network
 
     params["status"] = status
+
+    params["tag"] = tag
 
     params = {k: v for k, v in params.items() if v is not UNSET and v is not None}
 
@@ -86,6 +89,7 @@ def sync_detailed(
     limit: int | Unset = UNSET,
     network: ListContractsNetwork | Unset = UNSET,
     status: str | Unset = UNSET,
+    tag: str | Unset = UNSET,
 ) -> Response[Error | ListContractsResponse200]:
     """List tracked contracts
 
@@ -94,6 +98,7 @@ def sync_detailed(
         limit (int | Unset):
         network (ListContractsNetwork | Unset):
         status (str | Unset):
+        tag (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -108,6 +113,7 @@ def sync_detailed(
         limit=limit,
         network=network,
         status=status,
+        tag=tag,
     )
 
     response = client.get_httpx_client().request(
@@ -124,6 +130,7 @@ def sync(
     limit: int | Unset = UNSET,
     network: ListContractsNetwork | Unset = UNSET,
     status: str | Unset = UNSET,
+    tag: str | Unset = UNSET,
 ) -> Error | ListContractsResponse200 | None:
     """List tracked contracts
 
@@ -132,6 +139,7 @@ def sync(
         limit (int | Unset):
         network (ListContractsNetwork | Unset):
         status (str | Unset):
+        tag (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -147,6 +155,7 @@ def sync(
         limit=limit,
         network=network,
         status=status,
+        tag=tag,
     ).parsed
 
 
@@ -157,6 +166,7 @@ async def asyncio_detailed(
     limit: int | Unset = UNSET,
     network: ListContractsNetwork | Unset = UNSET,
     status: str | Unset = UNSET,
+    tag: str | Unset = UNSET,
 ) -> Response[Error | ListContractsResponse200]:
     """List tracked contracts
 
@@ -165,6 +175,7 @@ async def asyncio_detailed(
         limit (int | Unset):
         network (ListContractsNetwork | Unset):
         status (str | Unset):
+        tag (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -179,6 +190,7 @@ async def asyncio_detailed(
         limit=limit,
         network=network,
         status=status,
+        tag=tag,
     )
 
     response = await client.get_async_httpx_client().request(**kwargs)
@@ -193,6 +205,7 @@ async def asyncio(
     limit: int | Unset = UNSET,
     network: ListContractsNetwork | Unset = UNSET,
     status: str | Unset = UNSET,
+    tag: str | Unset = UNSET,
 ) -> Error | ListContractsResponse200 | None:
     """List tracked contracts
 
@@ -201,6 +214,7 @@ async def asyncio(
         limit (int | Unset):
         network (ListContractsNetwork | Unset):
         status (str | Unset):
+        tag (str | Unset):
 
     Raises:
         errors.UnexpectedStatus: If the server returns an undocumented status code and Client.raise_on_unexpected_status is True.
@@ -217,5 +231,6 @@ async def asyncio(
             limit=limit,
             network=network,
             status=status,
+            tag=tag,
         )
     ).parsed

@@ -29,9 +29,16 @@ from .contract_report import ContractReport
 from .contract_snapshot import ContractSnapshot
 from .contract_snapshot_export import ContractSnapshotExport
 from .contract_snapshot_export_summary import ContractSnapshotExportSummary
+from .contract_spec import ContractSpec
+from .contract_spec_function import ContractSpecFunction
+from .contract_spec_input import ContractSpecInput
+from .contract_spec_tree import ContractSpecTree
+from .contract_spec_type import ContractSpecType
 from .contract_stats import ContractStats
 from .contract_status import ContractStatus
 from .contract_summary import ContractSummary
+from .contract_tag_request import ContractTagRequest
+from .contract_tags import ContractTags
 from .contract_upgrade import ContractUpgrade
 from .contract_validation_result import ContractValidationResult
 from .create_alert_subscription import CreateAlertSubscription
@@ -220,9 +227,16 @@ __all__ = (
     "ContractSnapshot",
     "ContractSnapshotExport",
     "ContractSnapshotExportSummary",
+    "ContractSpec",
+    "ContractSpecFunction",
+    "ContractSpecInput",
+    "ContractSpecTree",
+    "ContractSpecType",
     "ContractStats",
     "ContractStatus",
     "ContractSummary",
+    "ContractTagRequest",
+    "ContractTags",
     "ContractUpgrade",
     "ContractValidationResult",
     "CreateAlertSubscription",

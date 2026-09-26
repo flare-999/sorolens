@@ -5,6 +5,7 @@ import type {
   CompareResponse,
   ContractSnapshot,
   ContractSummary,
+  ContractTagsResponse,
   ContractsListResponse,
   EventsResponse,
   GlobalEventsResponse,
@@ -73,6 +74,30 @@ async function fetchJson<T>(url: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+// fetchNoContent is the variant for endpoints that return 204 with no body.
+async function fetchNoContent(
+  url: string,
+  options?: RequestInit
+): Promise<void> {
+  const res = await fetch(url, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...options?.headers,
+    },
+  });
+
+  if (!res.ok) {
+    let body: { error?: string; code?: string } = {};
+    try {
+      body = await res.json();
+    } catch {
+      // ignore parse error
+    }
+    throw new ApiError(res.status, body.error || res.statusText, body.code);
+  }
+}
+
 export function listContractsAll(): Promise<ContractsListResponse> {
   return fetchJson<ContractsListResponse>(
     `${API_URL}/api/v1/contracts?limit=1000`
@@ -84,12 +109,14 @@ export function listContracts(params?: {
   limit?: number;
   network?: string;
   status?: string;
+  tag?: string;
 }): Promise<ContractsListResponse> {
   const search = new URLSearchParams();
   if (params?.cursor) search.set("cursor", params.cursor);
   if (params?.limit) search.set("limit", String(params.limit));
   if (params?.network) search.set("network", params.network);
   if (params?.status) search.set("status", params.status);
+  if (params?.tag) search.set("tag", params.tag);
   const qs = search.toString();
   return fetchJson<ContractsListResponse>(
     `${API_URL}/api/v1/contracts${qs ? "?" + qs : ""}`
@@ -113,6 +140,44 @@ export function trackContract(
 
 export function getContract(id: string): Promise<ContractDetail> {
   return fetchJson<ContractDetail>(`${API_URL}/api/v1/contracts/${id}`);
+}
+
+// ---- contract tags (issue #459) ---------------------------------------------
+
+/**
+ * Adds a user-defined tag. Requires a contributor identity, so the browser
+ * identity is forwarded the same way the watchlist and registration calls do.
+ * Adding a tag the contract already carries is a no-op, and the response is
+ * the contract's full, sorted tag list.
+ */
+export function addContractTag(
+  id: string,
+  tag: string,
+  userId: string
+): Promise<ContractTagsResponse> {
+  return fetchJson<ContractTagsResponse>(
+    `${API_URL}/api/v1/contracts/${id}/tags`,
+    {
+      method: "POST",
+      body: JSON.stringify({ tag }),
+      headers: { "X-User-ID": userId },
+    }
+  );
+}
+
+/** Removes a tag. Removing one the contract does not carry is a no-op. */
+export function removeContractTag(
+  id: string,
+  tag: string,
+  userId: string
+): Promise<void> {
+  return fetchJson<void>(
+    `${API_URL}/api/v1/contracts/${id}/tags/${encodeURIComponent(tag)}`,
+    {
+      method: "DELETE",
+      headers: { "X-User-ID": userId },
+    }
+  );
 }
 
 /**

@@ -11,6 +11,7 @@ export interface Contract {
   } | null;
   storage_entry_count: number;
   expiring_entry_count: number;
+  tags: string[];
 }
 
 export interface ContractDetail extends Contract {
@@ -137,12 +138,20 @@ export interface ContractSummary {
   wasm_hash: string | null;
   added_at: string;
   last_activity_at: string | null;
+  /** User-defined tags. Absent on optimistic rows built before a response. */
+  tags?: string[];
 }
 
 export interface ContractsListResponse {
   contracts: ContractSummary[];
   cursor: string | null;
   has_more: boolean;
+}
+
+/** Body of POST /api/v1/contracts/:id/tags — the contract's full tag list. */
+export interface ContractTagsResponse {
+  contract_id: string;
+  tags: string[];
 }
 
 export interface TrackContractRequest {

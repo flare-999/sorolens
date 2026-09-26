@@ -10,6 +10,8 @@ import {
   getContractStorage,
   getContractStats,
   getContractSnapshot,
+  addContractTag,
+  removeContractTag,
   ApiError,
 } from "@/lib/api";
 import type {
@@ -20,7 +22,9 @@ import type {
   ResourceTrendPoint,
   TimeWindow,
 } from "@/lib/types";
+import { getUserId } from "@/lib/user";
 import { StatCard } from "@/components/StatCard";
+import { TagInput } from "@/components/TagInput";
 import {
   CardSkeleton,
   ChartSkeleton,
@@ -50,6 +54,11 @@ function ContractDetailContent({ id }: { id: string }) {
   const [contract, setContract] = useState<ContractDetail | null>(null);
   const [contractError, setContractError] = useState<string | null>(null);
   const [contractLoading, setContractLoading] = useState(true);
+
+  // User-defined tags are edited inline on this page.
+  const [tags, setTags] = useState<string[]>([]);
+  const [tagError, setTagError] = useState<string | null>(null);
+  const [tagSaving, setTagSaving] = useState(false);
 
   const [window, setWindow] = useState<TimeWindow>("7d");
   const [stats, setStats] = useState<StatsResponse | null>(null);
@@ -86,7 +95,10 @@ function ContractDetailContent({ id }: { id: string }) {
     async function load() {
       try {
         const data = await getContract(id);
-        if (!cancelled) setContract(data);
+        if (!cancelled) {
+          setContract(data);
+          setTags(data.tags ?? []);
+        }
       } catch (err) {
         if (!cancelled) {
           if (err instanceof ApiError && err.status === 404) {
@@ -235,6 +247,46 @@ function ContractDetailContent({ id }: { id: string }) {
     }
   }, [id, storageCursor]);
 
+  const handleAddTag = useCallback(
+    async (tag: string) => {
+      setTagSaving(true);
+      setTagError(null);
+      try {
+        const res = await addContractTag(id, tag, getUserId());
+        setTags(res.tags ?? []);
+      } catch (err) {
+        setTagError(
+          err instanceof ApiError && err.status === 401
+            ? "You need a contributor identity to edit tags."
+            : "Failed to add tag."
+        );
+      } finally {
+        setTagSaving(false);
+      }
+    },
+    [id]
+  );
+
+  const handleRemoveTag = useCallback(
+    async (tag: string) => {
+      setTagSaving(true);
+      setTagError(null);
+      try {
+        await removeContractTag(id, tag, getUserId());
+        setTags((prev) => prev.filter((t) => t !== tag));
+      } catch (err) {
+        setTagError(
+          err instanceof ApiError && err.status === 401
+            ? "You need a contributor identity to edit tags."
+            : "Failed to remove tag."
+        );
+      } finally {
+        setTagSaving(false);
+      }
+    },
+    [id]
+  );
+
   if (contractLoading) {
     return (
       <div>
@@ -320,6 +372,16 @@ function ContractDetailContent({ id }: { id: string }) {
             </span>
           </div>
         )}
+        <div className="mt-3 max-w-lg">
+          <TagInput
+            tags={tags}
+            onAdd={handleAddTag}
+            onRemove={handleRemoveTag}
+            disabled={tagSaving}
+            error={tagError}
+            placeholder="Add a tag (prod, staging…)"
+          />
+        </div>
       </header>
 
       <section className="mb-8 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">

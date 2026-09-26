@@ -12,7 +12,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"sort"
+	"runtime"
+	"sync"
 	"time"
 
 	"github.com/sorolens/sorolens/services/indexer/internal/anomaly"
@@ -23,11 +24,6 @@ import (
 )
 
 const (
-	// defaultNetworkLabel is the value used for the "network" metric label
-	// when the poller is wired with the single unnamed RPC client (no
-	// per-network SOROBAN_RPC_URL_* variables configured), issue #198.
-	defaultNetworkLabel = "default"
-
 	// maxEventRetries is how many times a single event is retried before
 	// it is parked in the dead-letter queue (issue #202).
 	maxEventRetries = 3
@@ -47,6 +43,9 @@ const (
 
 // Config holds runtime parameters for the Poller.
 type Config struct {
+	// Workers is the maximum number of contracts processed concurrently. Values
+	// less than one default to GOMAXPROCS.
+	Workers int
 	// LedgerWindow is the maximum number of ledgers to request per getEvents
 	// call. Matches INDEXER_LEDGER_WINDOW from the API config.
 	LedgerWindow uint32
@@ -103,7 +102,7 @@ func NewWithRPCClients(rpcClients map[string]RPCClient, store Store, redis Redis
 // Run starts the poller in the given mode.
 // mode must be "once" or "continuous".
 // The context controls graceful shutdown: when ctx is cancelled the poller
-// finishes the current contract then returns.
+// finishes in-flight contracts, skips queued contracts, then returns.
 func (p *Poller) Run(ctx context.Context, mode string) error {
 	switch mode {
 	case "once":
@@ -128,6 +127,7 @@ func (p *Poller) runOnce(ctx context.Context) error {
 
 	err := p.processAll(ctx)
 	elapsed := time.Since(start)
+	p.metrics.ObserveRunDuration("once", elapsed.Seconds())
 
 	if ctx.Err() == context.DeadlineExceeded {
 		p.log.Warn("indexer run exceeded max-duration, exiting cleanly",
@@ -142,9 +142,11 @@ func (p *Poller) runOnce(ctx context.Context) error {
 // runContinuous loops until ctx is cancelled, sleeping PollInterval between passes.
 func (p *Poller) runContinuous(ctx context.Context) error {
 	for {
+		passStart := time.Now()
 		if err := p.processAll(ctx); err != nil {
 			p.log.Error("indexer pass error", "err", err)
 		}
+		p.metrics.ObserveRunDuration("continuous", time.Since(passStart).Seconds())
 		select {
 		case <-ctx.Done():
 			p.log.Info("indexer shutting down")
@@ -160,35 +162,67 @@ func (p *Poller) processAll(ctx context.Context) error {
 	if err := partition.EnsureNextMonthPartition(ctx, p.store); err != nil {
 		p.log.Warn("failed to ensure next month partition", "err", err)
 	}
+	workerCount := p.cfg.Workers
+	if workerCount < 1 {
+		workerCount = runtime.GOMAXPROCS(0)
+	}
+	jobs := make(chan Contract, workerCount)
+	var workers sync.WaitGroup
+	workers.Add(workerCount)
+	for i := 0; i < workerCount; i++ {
+		go func() {
+			defer workers.Done()
+			for contract := range jobs {
+				// Preserve graceful shutdown semantics: contracts already being
+				// processed finish, but queued contracts do not start after cancel.
+				if ctx.Err() != nil {
+					continue
+				}
+				if err := p.processContract(context.WithoutCancel(ctx), contract); err != nil {
+					// One failing contract must not block the rest of the pass.
+					p.log.Error("failed to index contract",
+						"contract_id", contract.ID,
+						"err", err,
+					)
+				}
+			}
+		}()
+	}
+	stopWorkers := func() {
+		close(jobs)
+		workers.Wait()
+	}
 
 	var cursor string
 	for {
 		// Check for shutdown between contract batches.
 		if ctx.Err() != nil {
+			stopWorkers()
 			return nil
 		}
 
 		contracts, next, err := p.store.ListContracts(ctx, cursor, 50)
 		if err != nil {
+			stopWorkers()
 			return fmt.Errorf("list contracts: %w", err)
 		}
 
+	contractBatch:
 		for _, c := range contracts {
 			if ctx.Err() != nil {
-				return nil
+				break contractBatch
 			}
 			if c.Status != "active" && c.Status != "backfilling" {
 				continue
 			}
-			// An in-flight batch must finish on a context detached from shutdown,
-			// so a SIGTERM mid-fetch cannot tear the commit in half.
-			if err := p.processContract(context.WithoutCancel(ctx), c); err != nil {
-				// Log and continue; one failing contract must not block others.
-				p.log.Error("failed to index contract",
-					"contract_id", c.ID,
-					"err", err,
-				)
+			select {
+			case <-ctx.Done():
+				break contractBatch
+			case jobs <- c:
 			}
+		}
+		if ctx.Err() != nil {
+			break
 		}
 
 		if next == "" {
@@ -196,10 +230,7 @@ func (p *Poller) processAll(ctx context.Context) error {
 		}
 		cursor = next
 	}
-
-	// Record per-network lag after the contract batches have committed their
-	// cursors so the gauge reflects the tip reached by this pass (issue #198).
-	p.observeNetworkLag(ctx)
+	stopWorkers()
 
 	if p.cfg.AnomalyEnabled {
 		p.runAnomalyDetection(ctx)
@@ -453,6 +484,11 @@ func (p *Poller) processContract(ctx context.Context, contract Contract) error {
 		)
 	}
 
+	// Cache the contract's SEP-48 interface spec on first index (issue #130).
+	// Best-effort: every failure mode logs a warning inside, so this never
+	// blocks event indexing.
+	p.cacheContractSpec(ctx, rpc, contract)
+
 	latest, err := rpc.GetLatestLedger(ctx)
 	if err != nil {
 		return fmt.Errorf("get latest ledger: %w", err)
@@ -463,29 +499,18 @@ func (p *Poller) processContract(ctx context.Context, contract Contract) error {
 		return fmt.Errorf("get sync state: %w", err)
 	}
 
-	networkCursor, err := p.store.GetIndexerCursor(ctx, network)
-	if err != nil {
-		p.log.Warn("failed to fetch indexer cursor for network (continuing)",
-			"network", network,
-			"err", err,
-		)
-	}
-
 	var startLedger uint32
 	if syncState.LastLedger == 0 {
-		if networkCursor > 0 {
-			// Resume after the last successfully committed network batch
-			startLedger = networkCursor + 1
-		} else if latest.Sequence > newContractBackfillWindow {
-			// New contract: best-effort backfill from within the retention window.
+		// New contract: best-effort backfill from within the retention window.
+		if latest.Sequence > newContractBackfillWindow {
 			startLedger = latest.Sequence - newContractBackfillWindow
 		} else {
 			startLedger = 1
 		}
-		p.log.Warn("starting sync for contract",
+		p.log.Warn("new contract, starting partial backfill; events before this ledger are unavailable",
 			"contract_id", contractID,
 			"start_ledger", startLedger,
-			"network_cursor", networkCursor,
+			"retention_window_ledgers", newContractBackfillWindow,
 		)
 	} else {
 		startLedger = syncState.LastLedger + 1
@@ -515,38 +540,28 @@ func (p *Poller) processContract(ctx context.Context, contract Contract) error {
 		return err
 	}
 
-	newState := SyncState{ContractID: contractID, LastLedger: endLedger}
-	if err := p.store.BatchInsertWithCursor(ctx, network, endLedger, events, invocations, newState); err != nil {
-		// A single poison event must not stall the contract. Fall back to
-		// isolating the batch: retry each event on its own, park the ones
-		// that keep failing in the dead-letter queue (issue #202), and then
-		// commit the rest so the cursor still advances.
-		if dlqErr := p.insertEventsWithDLQ(ctx, events); dlqErr != nil {
-			return fmt.Errorf("insert events: %w", dlqErr)
+	if len(events) > 0 {
+		if err := p.insertEventsWithDLQ(ctx, events); err != nil {
+			return fmt.Errorf("insert events: %w", err)
 		}
-		if len(invocations) > 0 {
-			if invErr := p.store.BatchInsertInvocations(ctx, invocations); invErr != nil {
-				return fmt.Errorf("batch insert invocations: %w", invErr)
-			}
-		}
-		if stateErr := p.store.UpsertSyncState(ctx, newState); stateErr != nil {
-			return fmt.Errorf("upsert sync state: %w", stateErr)
-		}
-		if curErr := p.store.SetIndexerCursor(ctx, network, endLedger); curErr != nil {
-			return fmt.Errorf("set indexer cursor: %w", curErr)
+	}
+	if len(invocations) > 0 {
+		if err := p.store.BatchInsertInvocations(ctx, invocations); err != nil {
+			return fmt.Errorf("batch insert invocations: %w", err)
 		}
 	}
 
-	// ---- Wasm hash transition detection (issue #276) ----------------------
-	if wasmHash, hashErr := rpc.GetContractWasmHash(ctx, contractID); hashErr != nil {
-		// Non-fatal: a single RPC miss must not stall the rest of the indexer.
-		p.log.Warn("failed to fetch contract wasm hash, skipping version check",
-			"contract_id", contractID,
-			"err", hashErr,
-		)
-	} else if wasmHash != "" {
-		p.maybeRecordVersion(ctx, contractID, wasmHash, endLedger, invocations)
+	newState := SyncState{ContractID: contractID, LastLedger: endLedger}
+	if err := p.store.UpsertSyncState(ctx, newState); err != nil {
+		return fmt.Errorf("upsert sync state: %w", err)
 	}
+
+	// Only count work that was actually committed: a failed insert returns
+	// above, so these series always describe durable progress. The lag sample
+	// uses the batch's final ledger as the committed cursor, which is clamped
+	// at zero against the observed head.
+	p.metrics.AddEventsProcessed(network, len(events))
+	p.metrics.ObserveNetwork(network, latest.Sequence, endLedger)
 
 	log.Info("contract indexed",
 		"events", len(events),
@@ -565,13 +580,6 @@ func (p *Poller) processContract(ctx context.Context, contract Contract) error {
 // whole slice when any one element is bad, so retrying as a batch would park
 // the good events alongside the bad one.
 func (p *Poller) insertEventsWithDLQ(ctx context.Context, events []Event) error {
-	type failed struct {
-		ev  Event
-		err error
-	}
-	wrote := 0
-	var failures []failed
-
 	for _, ev := range events {
 		var lastErr error
 		stored := false
@@ -584,53 +592,37 @@ func (p *Poller) insertEventsWithDLQ(ctx context.Context, events []Event) error 
 			break
 		}
 		if stored {
-			wrote++
 			continue
 		}
-		failures = append(failures, failed{ev: ev, err: lastErr})
-	}
-	if len(failures) == 0 {
-		return nil
-	}
 
-	// Parking is only meaningful when the store proved it can still take
-	// writes. If not one event in the batch could be written, this is a
-	// store-wide outage rather than a poison payload: surfacing an error keeps
-	// the caller from advancing the cursor over data that was never persisted
-	// and stops a connection blip from flooding the dead-letter queue.
-	if wrote == 0 {
-		return fmt.Errorf("store rejected every event in the batch: %w", failures[0].err)
-	}
-
-	for _, f := range failures {
 		// EventPayload is what the requeue endpoint re-inserts, so it must be a
 		// JSON-serialized Event: handler/dlq.go unmarshals it back into
 		// store.Event. Event holds only plain fields, so a marshal failure is
 		// unreachable in practice — park the row anyway rather than drop it.
-		payload, marshalErr := json.Marshal(f.ev)
+		payload, marshalErr := json.Marshal(ev)
 		msg := "insert retries exhausted"
 		switch {
 		case marshalErr != nil:
-			p.log.Error("marshal event for DLQ", "event_id", f.ev.ID, "err", marshalErr)
+			p.log.Error("marshal event for DLQ", "event_id", ev.ID, "err", marshalErr)
 			payload, msg = nil, "marshal payload: "+marshalErr.Error()
-		case f.err != nil:
-			msg = f.err.Error()
+		case lastErr != nil:
+			msg = lastErr.Error()
 		}
 
 		if err := p.store.InsertFailedEvent(ctx, FailedEvent{
-			EventID:      f.ev.ID,
-			ContractID:   f.ev.ContractID,
-			Network:      f.ev.Network,
+			EventID:      ev.ID,
+			ContractID:   ev.ContractID,
+			Network:      ev.Network,
 			EventPayload: payload,
 			ErrorMessage: msg,
 			Attempts:     maxEventRetries,
 		}); err != nil {
 			// The event is now stored nowhere, which the caller must know about.
-			return fmt.Errorf("park event %s in DLQ: %w", f.ev.ID, err)
+			return fmt.Errorf("park event %s in DLQ: %w", ev.ID, err)
 		}
 		p.log.Warn("event parked in DLQ",
-			"event_id", f.ev.ID,
-			"contract_id", f.ev.ContractID,
+			"event_id", ev.ID,
+			"contract_id", ev.ContractID,
 			"attempts", maxEventRetries,
 			"err", msg,
 		)
@@ -686,8 +678,8 @@ func (p *Poller) checkWasmHash(ctx context.Context, rpc RPCClient, contract Cont
 	}
 
 	if currentHash == contract.WasmHash {
-		// Hash unchanged — still ensure the binary is cached (e.g. after
-		// deploying the Wasm-cache feature against already-tracked contracts).
+		// Hash unchanged — still make sure the binary is cached, so
+		// contracts tracked before this feature existed get backfilled.
 		if err := p.cacheWasmBinary(ctx, rpc, currentHash); err != nil {
 			p.log.Warn("wasm binary cache failed (continuing)",
 				"contract_id", contract.ID,
@@ -727,123 +719,19 @@ func (p *Poller) checkWasmHash(ctx context.Context, rpc RPCClient, contract Cont
 	return nil
 }
 
-// observeNetworkLag records the per-network indexer lag (issue #198), defined
-// as the network head ledger minus the last ledger committed for that network
-// (its indexer cursor). It runs once per pass for every configured network, so
-// both the currently active and merely cached networks report a value rather
-// than a single hard-coded one.
-//
-// Best-effort by design: a transient RPC or store error for one network is
-// logged and skipped without failing the indexing pass.
-func (p *Poller) observeNetworkLag(ctx context.Context) {
-	if p.metrics == nil {
-		return
-	}
-
-	networks := make([]string, 0, len(p.rpcClients))
-	for network := range p.rpcClients {
-		networks = append(networks, network)
-	}
-	sort.Strings(networks)
-
-	for _, network := range networks {
-		if ctx.Err() != nil {
-			return
-		}
-		rpc := p.rpcClients[network]
-		if rpc == nil {
-			continue
-		}
-
-		label := network
-		if label == "" {
-			label = defaultNetworkLabel
-		}
-
-		head, err := rpc.GetLatestLedger(ctx)
-		if err != nil {
-			p.log.Warn("metrics: latest ledger unavailable",
-				"network", label,
-				"err", err,
-			)
-			continue
-		}
-		if head == nil {
-			continue
-		}
-
-		cursor, err := p.store.GetIndexerCursor(ctx, network)
-		if err != nil {
-			p.log.Warn("metrics: indexer cursor unavailable",
-				"network", label,
-				"err", err,
-			)
-			continue
-		}
-
-		p.metrics.ObserveNetwork(label, head.Sequence, cursor)
-	}
-}
-
-func (p *Poller) maybeRecordVersion(
-	ctx context.Context,
-	contractID, wasmHash string,
-	endLedger uint32,
-	invocations []Invocation,
-) {
-	prev, err := p.store.GetLatestContractVersion(ctx, contractID)
-	if err != nil && err != ErrVersionNotFound {
-		p.log.Warn("failed to get latest contract version",
-			"contract_id", contractID, "err", err)
-		return
-	}
-
-	// No change: the current hash matches the most recently recorded one.
-	if err == nil && prev.WasmHash == wasmHash {
-		return
-	}
-
-	cv := ContractVersion{
-		ContractID:      contractID,
-		WasmHash:        wasmHash,
-		FirstSeenLedger: int64(endLedger),
-		TxHash:          anchorTxHash(invocations),
-	}
-	if recordErr := p.store.RecordContractVersion(ctx, cv); recordErr != nil {
-		p.log.Warn("failed to record contract version",
-			"contract_id", contractID,
-			"wasm_hash", wasmHash,
-			"err", recordErr,
-		)
-		return
-	}
-	p.log.Info("new wasm hash detected, version recorded",
-		"contract_id", contractID,
-		"wasm_hash", wasmHash,
-		"first_seen_ledger", endLedger,
-	)
-}
-
-func anchorTxHash(invocations []Invocation) string {
-	var best Invocation
-	for _, inv := range invocations {
-		if inv.Ledger > best.Ledger {
-			best = inv
-		}
-	}
-	return best.TxHash
-}
-
 // cacheWasmBinary fetches the CONTRACT_CODE ledger entry for wasmHash and
 // stores the raw bytes in the content-addressed Wasm cache (issue #162).
-// Best-effort: missing entries and decode failures are non-fatal so event
-// indexing is never blocked by a Wasm fetch problem.
+//
+// Best-effort by design: a missing entry (ledger retention, or a race with
+// the ledger closing) or a decode failure is reported to the caller, which
+// logs it and retries on the next poll. Event indexing is never blocked by a
+// Wasm fetch problem.
 func (p *Poller) cacheWasmBinary(ctx context.Context, rpc RPCClient, wasmHash string) error {
-	exists, err := p.store.HasContractWasm(ctx, wasmHash)
+	cached, err := p.store.HasContractWasm(ctx, wasmHash)
 	if err != nil {
 		return fmt.Errorf("has contract wasm: %w", err)
 	}
-	if exists {
+	if cached {
 		return nil
 	}
 
@@ -855,22 +743,24 @@ func (p *Poller) cacheWasmBinary(ctx context.Context, rpc RPCClient, wasmHash st
 	if err != nil {
 		return fmt.Errorf("get code entry: %w", err)
 	}
+
 	var code []byte
 	for _, e := range res.Entries {
-		if c, ok := wasm.WasmCodeFromEntry(e.XDR); ok {
+		if c, ok := wasm.WasmCodeFromCodeEntry(e.XDR); ok {
 			code = c
 			break
 		}
 	}
 	if len(code) == 0 {
-		// Code entry not yet readable (retention / race); retry next poll.
+		// Code entry not readable yet; retry on the next poll.
 		return nil
 	}
 	if err := p.store.UpsertContractWasm(ctx, wasmHash, code); err != nil {
 		return fmt.Errorf("upsert contract wasm: %w", err)
 	}
+
 	p.log.Info("cached contract wasm binary",
-		"wasm_hash", wasmHash,
+		"contract_id_hash", wasmHash,
 		"size_bytes", len(code),
 	)
 	return nil

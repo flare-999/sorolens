@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { DataTable, Toast } from "@sorolens/ui";
 import type { Column } from "@sorolens/ui";
@@ -10,25 +10,9 @@ import type { ContractSummary } from "@/lib/types";
 import { networkFilter, useNetwork } from "@/lib/network";
 import { contractRowKey, isPendingRow } from "@/lib/optimisticTrack";
 import type { ContractRow } from "@/lib/optimisticTrack";
+import { getUserId } from "@/lib/user";
 import { TableSkeleton } from "@/components/Skeleton";
 import ImportContractsCsv from "@/components/ImportContractsCsv";
-
-// RBAC identity: same localStorage key the watchlist page uses, so the UI
-// registers a contract under the same user identity. Must map to a user
-// granted at least the contributor role in the API's users table.
-const STORAGE_KEY = "sorolens_user_id";
-
-function getUserId(): string {
-  if (typeof window === "undefined") return "";
-  try {
-    return window.localStorage.getItem(STORAGE_KEY) || "";
-  } catch {
-    // localStorage can be unavailable (private mode, some test runners);
-    // RBAC still allows registered-contract calls for anonymous callers as
-    // reads remain open.
-    return "";
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -139,6 +123,7 @@ const COLUMNS: Column<ContractRow>[] = [
       </span>
     ),
   },
+
   {
     key: "last_activity_at",
     header: "Last activity",
@@ -151,10 +136,48 @@ const COLUMNS: Column<ContractRow>[] = [
   },
 ];
 
+/**
+ * The base columns plus a Tags column whose chips feed the server-side tag
+ * filter. Built per render rather than declared as a constant because the chips
+ * need the click handler; the handler only calls `setTagFilter`, which is
+ * stable, so `useMemo(..., [])` around the result stays correct.
+ */
+function makeColumns(onTagClick: (tag: string) => void): Column<ContractRow>[] {
+  const tagsColumn: Column<ContractRow> = {
+    key: "tags",
+    header: "Tags",
+    accessor: (c) =>
+      c.tags && c.tags.length > 0 ? (
+        <span className="flex flex-wrap gap-1">
+          {c.tags.map((tag) => (
+            <button
+              key={tag}
+              type="button"
+              onClick={() => onTagClick(tag)}
+              className="rounded-full bg-[var(--color-bg-card)] px-2 py-0.5 text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]"
+            >
+              {tag}
+            </button>
+          ))}
+        </span>
+      ) : (
+        <span className="text-xs text-[var(--color-text-secondary)]">—</span>
+      ),
+  };
+
+  // Sits after Status: the tags read as part of how a contract is identified,
+  // before the date columns.
+  const statusIndex = COLUMNS.findIndex((column) => column.key === "status");
+  return [
+    ...COLUMNS.slice(0, statusIndex + 1),
+    tagsColumn,
+    ...COLUMNS.slice(statusIndex + 1),
+  ];
+}
+
 // ---------------------------------------------------------------------------
 // Main Page
 // ---------------------------------------------------------------------------
-
 export default function ContractsPage() {
   // Selected network from the header selector.
   const { network } = useNetwork();
@@ -170,6 +193,9 @@ export default function ContractsPage() {
 
   // Search state
   const [search, setSearch] = useState("");
+
+  // Tag filter state (server-side, combined with the network filter)
+  const [tagFilter, setTagFilter] = useState("");
 
   // Sort state
   const [sortColumn, setSortColumn] = useState<string>("added_at");
@@ -203,6 +229,7 @@ export default function ContractsPage() {
           cursor: cursor ?? undefined,
           limit: PAGE_SIZE,
           network: networkFilter(network),
+          tag: tagFilter || undefined,
         });
         if (seq !== loadSeq.current) return;
         setContracts(data.contracts ?? []);
@@ -217,23 +244,27 @@ export default function ContractsPage() {
         if (seq === loadSeq.current) setLoading(false);
       }
     },
-    [network]
+    [network, tagFilter]
   );
 
   useEffect(() => {
     load(cursors[cursorIndex]);
   }, [load, cursors, cursorIndex]);
 
-  // Reset to the first page when the network filter changes. The ref guard
-  // keeps this from firing an extra fetch on mount.
+  // Reset to the first page when the network or tag filter changes. The ref
+  // guard keeps this from firing an extra fetch on mount.
   const prevNetwork = useRef(network);
+  const prevTag = useRef(tagFilter);
   useEffect(() => {
-    if (prevNetwork.current !== network) {
+    const networkChanged = prevNetwork.current !== network;
+    const tagChanged = prevTag.current !== tagFilter;
+    if (networkChanged || tagChanged) {
       prevNetwork.current = network;
+      prevTag.current = tagFilter;
       setCursors([null]);
       setCursorIndex(0);
     }
-  }, [network]);
+  }, [network, tagFilter]);
 
   // ---------------------------------------------------------------------------
   // Pagination handlers
@@ -299,6 +330,9 @@ export default function ContractsPage() {
     setCursorIndex(0);
   };
 
+  // Columns depend on the tag-click handler so a tag chip can set the filter.
+  const columns = useMemo(() => makeColumns((tag) => setTagFilter(tag)), []);
+
   // ---------------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------------
@@ -353,8 +387,8 @@ export default function ContractsPage() {
           </div>
         </div>
 
-        {/* Search */}
-        <div className="mb-4">
+        {/* Filters: free-text search and server-side tag filter */}
+        <div className="mb-4 flex flex-col gap-3 sm:flex-row">
           <input
             id="contracts-search"
             type="search"
@@ -363,6 +397,15 @@ export default function ContractsPage() {
             placeholder="Search by alias or contract ID…"
             aria-label="Search contracts"
             className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] px-4 py-2.5 text-sm text-[var(--color-text-primary)] placeholder-[var(--color-text-secondary)] focus:border-[var(--color-accent)] focus:outline-none"
+          />
+          <input
+            id="contracts-tag-filter"
+            type="search"
+            value={tagFilter}
+            onChange={(e) => setTagFilter(e.target.value)}
+            placeholder="Filter by tag…"
+            aria-label="Filter contracts by tag"
+            className="w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-bg-card)] px-4 py-2.5 text-sm text-[var(--color-text-primary)] placeholder-[var(--color-text-secondary)] focus:border-[var(--color-accent)] focus:outline-none sm:max-w-xs"
           />
         </div>
 
@@ -377,7 +420,7 @@ export default function ContractsPage() {
                 ? "No contracts match your search"
                 : "No contracts tracked yet"}
             </p>
-            {!search && (
+            {!search && !tagFilter && (
               <p className="mt-2 text-sm text-[var(--color-text-secondary)]">
                 Use the CLI or API to start tracking a Soroban contract, or
                 click{" "}
@@ -396,7 +439,7 @@ export default function ContractsPage() {
         {/* Data table */}
         {!loading && sorted.length > 0 && (
           <DataTable<ContractRow>
-            columns={COLUMNS}
+            columns={columns}
             data={sorted}
             rowKey={contractRowKey}
             sortColumn={sortColumn}

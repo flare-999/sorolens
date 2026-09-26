@@ -21,6 +21,8 @@ type FullStore interface {
 	ArchiveStore
 	WatchdogStore
 	ContractUpgradeStore
+	ContractSpecStore
+	ContractTagStore
 	HealthScoreStore
 	APIKeyStore
 	AlertSubscriptionStore
