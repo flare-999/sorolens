@@ -2719,6 +2719,44 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  /api/v1/contracts/{id}/wasm:
+    get:
+      tags: [Contracts]
+      summary: Download the contract's cached Wasm binary
+      operationId: getContractWasm
+      description: |
+        Returns the exact on-chain Wasm bytes for the contract. The indexer
+        caches the binary on the first CONTRACT_CODE entry it sees, so the
+        payload is content-addressed by Wasm hash and safe to serve
+        immutably (issue #162).
+      security:
+        - ApiKeyAuth: [read:contracts]
+      parameters:
+        - $ref: "#/components/parameters/ContractID"
+      responses:
+        "200":
+          description: The raw Wasm binary.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+            X-Wasm-Hash:
+              schema:
+                type: string
+          content:
+            application/wasm:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Unknown contract, or its Wasm has not been fetched yet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
   /api/v1/stream/events:
     get:
       tags: [Events]

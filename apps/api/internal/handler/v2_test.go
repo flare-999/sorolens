@@ -281,7 +281,11 @@ func TestV2CoversEveryV1Route(t *testing.T) {
 		// CSV export (#160): a bulk download over the same data as the v1
 		// event listing. v2 exposes the JSON listing; the flat file follows
 		// when the export is ported.
-		"GET /api/v1/contracts/{id}/events.csv":        true,
+		"GET /api/v1/contracts/{id}/events.csv": true,
+		// Wasm binary download (#162): raw application/wasm bytes, not a JSON
+		// document, so it has no meaning under the v2 envelope. The v2
+		// contract surface keeps its JSON twins only.
+		"GET /api/v1/contracts/{id}/wasm": true,
 	}
 
 	var missing []string
