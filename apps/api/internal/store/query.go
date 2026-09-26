@@ -29,6 +29,7 @@ type FullStore interface {
 	ContractWasmStore
 	GlobalEventStore
 	LabelStore
+	FailedEventStore
 }
 
 // NewFullStore returns a FullStore backed by the given pool.

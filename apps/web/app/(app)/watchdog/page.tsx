@@ -51,10 +51,6 @@ export default function WatchdogPage() {
       const filter = networkFilter(network);
       const [s, a] = await Promise.all([
         getWatchdogStats(filter).catch(() => ZERO_STATS),
-        listMonitoredContracts({ limit: 50, network: filter }).catch(() => ({
-          contracts: [],
-          next_cursor: "",
-        })),
         listAlerts(undefined, { limit: 20, network: filter }).catch(() => ({
           alerts: [],
           next_cursor: "",
@@ -97,7 +93,7 @@ export default function WatchdogPage() {
         if (seq === loadSeq.current) setContractsLoading(false);
       }
     },
-    [network],
+    [network]
   );
 
   useEffect(() => {

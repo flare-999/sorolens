@@ -21,6 +21,8 @@ vi.mock("@/lib/api", () => ({
 function invocation(ledgerClosedAt: string): Invocation {
   return {
     tx_hash: "a1b2c3",
+    contract_id: "CABC1234",
+    network: "testnet",
     ledger: 120_400,
     ledger_closed_at: ledgerClosedAt,
     status: "success",
@@ -96,8 +98,7 @@ describe("getInvocationFrequency", () => {
   it("aggregates invocations fetched with a 24-hour since bound", async () => {
     mockGetContractInvocations.mockResolvedValue({
       invocations: [invocation(new Date().toISOString())],
-      cursor: null,
-      has_more: false,
+      next_cursor: "",
     });
 
     const points = await getInvocationFrequency("CCONTRACT", 24);
@@ -117,13 +118,11 @@ describe("getInvocationFrequency", () => {
     mockGetContractInvocations
       .mockResolvedValueOnce({
         invocations: [invocation(twoHoursAgo)],
-        cursor: "next",
-        has_more: true,
+        next_cursor: "next",
       })
       .mockResolvedValueOnce({
         invocations: [invocation(hourAgo)],
-        cursor: null,
-        has_more: false,
+        next_cursor: "",
       });
 
     const points = await getInvocationFrequency("CCONTRACT", 24);
